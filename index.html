@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mihomo Unofficial APT Repository</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color: #333; }
+        pre { background: #f4f4f4; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+        code { background: #f4f4f4; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.9em; }
+        .success { color: #2e7d32; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Mihomo Unofficial APT Repository</h1>
+    <p class="success">✅ Repository is active.</p>
+    <p>Latest Update: Prerelease-Alpha-2025-05-27T01:12:29Z</p>
+    <h2>Quick Setup</h2>
+    <pre><code>curl -fsSL https://sudo-bai.github.io/Mihomo-Unofficial-APT-Repository/public.key | sudo gpg --dearmor -o /usr/share/keyrings/mihomo-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/mihomo-archive-keyring.gpg arch=amd64,arm64] https://sudo-bai.github.io/Mihomo-Unofficial-APT-Repository/ stable main" | sudo tee /etc/apt/sources.list.d/mihomo.list
+
+sudo apt update
+sudo apt install mihomo</code></pre>
+    <p><a href="https://github.com/sudo-bai/Mihomo-Unofficial-APT-Repository">View Source on GitHub</a></p>
+</body>
+</html>
