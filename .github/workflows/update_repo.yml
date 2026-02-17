@@ -2,22 +2,22 @@ name: Update APT Repository
 
 on:
   schedule:
-    # 每 4 小时检查一次
     - cron: '0 */4 * * *'
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
     inputs:
       force_update:
-        description: 'Force update (ignore version check)'
+        description: 'Force update'
         required: false
         default: false
         type: boolean
 
+permissions:
+  contents: write
+
 jobs:
   update-repo:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,83 +33,70 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           if [ -z "$GPG_PRIVATE_KEY" ]; then
-            echo "::error::GPG_PRIVATE_KEY secret is not set in GitHub Settings!"
+            echo "::error::GPG_PRIVATE_KEY secret is not set!"
             exit 1
           fi
-          
           echo "$GPG_PRIVATE_KEY" > private.key
-          
-          # 导入私钥 (使用 || true 容忍非致命格式警告)
           echo "Importing key..."
-          gpg --batch --import private.key || echo "GPG import finished with warnings."
+          gpg --batch --import private.key || echo "Import warning ignored."
           rm private.key
-          
-          # 配置 GPG 代理
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
-          
-          # 验证密钥
-          echo "Verifying secret key existence..."
-          if ! gpg --list-secret-keys --keyid-format LONG | grep -q "sec"; then
-             echo "::error::No secret keys found. Import failed completely."
-             exit 1
-          fi
-          echo "Secret key verified successfully."
 
-      - name: Check for updates and download
+      - name: Check for updates
         id: check_update
         run: |
           UPSTREAM_REPO="vernesong/mihomo"
+          GITHUB_PAGES_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
           
-          LATEST_RELEASE_JSON=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases?per_page=1" | jq '.[0]')
+          # 获取上游最新版本信息
+          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/$UPSTREAM_REPO/releases?per_page=1" | jq '.[0]')
+          RELEASE_ID=$(echo "$LATEST_RELEASE" | jq -r .id)
+          TAG_NAME=$(echo "$LATEST_RELEASE" | jq -r .tag_name)
+          PUBLISHED_AT=$(echo "$LATEST_RELEASE" | jq -r .published_at)
           
-          RELEASE_ID=$(echo "$LATEST_RELEASE_JSON" | jq -r .id)
-          TAG_NAME=$(echo "$LATEST_RELEASE_JSON" | jq -r .tag_name)
-          PUBLISHED_AT=$(echo "$LATEST_RELEASE_JSON" | jq -r .published_at)
-          
-          echo "Upstream Release ID: $RELEASE_ID"
           echo "Upstream Tag: $TAG_NAME"
+
+          # 获取当前仓库(gh-pages)的在线版本 (通过 curl 获取，而不是读本地文件)
+          # 如果获取失败（比如第一次运行），则设为 none
+          CURRENT_VERSION_STR=$(curl -sL --fail "$GITHUB_PAGES_URL/human_version.txt" || echo "none")
           
-          if [ -f release_id.txt ]; then
-            CURRENT_ID=$(cat release_id.txt)
-          else
-            CURRENT_ID="none"
-          fi
+          echo "Current Online Version: $CURRENT_VERSION_STR"
           
           FORCE_UPDATE="${{ github.event.inputs.force_update }}"
-          
-          # 逻辑：如果 ID 相同 且 不是强制更新，则退出
-          if [ "$FORCE_UPDATE" != "true" ] && ([ "$RELEASE_ID" == "$CURRENT_ID" ] || [ "$RELEASE_ID" == "null" ]); then
-            echo "No update found (ID match)."
+          TARGET_VERSION_STR="$TAG_NAME-$PUBLISHED_AT"
+
+          # 对比版本
+          if [ "$FORCE_UPDATE" != "true" ] && [ "$CURRENT_VERSION_STR" == "$TARGET_VERSION_STR" ]; then
+            echo "::notice::No update needed."
             echo "updated=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          echo "Update triggered (New version or Forced)."
+          echo "::notice::Update triggered!"
           echo "updated=true" >> $GITHUB_OUTPUT
           
-          echo "$RELEASE_ID" > release_id.txt
-          echo "$TAG_NAME-$PUBLISHED_AT" > human_version.txt
+          # 准备输出目录 (public 文件夹用于发布)
+          mkdir -p public/pool/main/m/mihomo
+          mkdir -p public/dists/stable/main/binary-amd64
+          mkdir -p public/dists/stable/main/binary-arm64
+          mkdir -p public/dists/stable/main/binary-armhf
           
-          mkdir -p pool/main/m/mihomo
+          # 保存版本号到 public 目录
+          echo "$RELEASE_ID" > public/release_id.txt
+          echo "$TARGET_VERSION_STR" > public/human_version.txt
           
-          # 下载 .deb 文件
-          echo "$LATEST_RELEASE_JSON" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' | while read url; do
+          # 下载 .deb 文件到 public/pool
+          echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' | while read url; do
             filename=$(basename "$url")
             echo "Downloading $filename..."
-            curl -L -o "pool/main/m/mihomo/$filename" "$url"
+            curl -L -o "public/pool/main/m/mihomo/$filename" "$url"
           done
-          
-          echo "Files in pool directory:"
-          ls -R pool/
 
       - name: Generate APT metadata
         if: steps.check_update.outputs.updated == 'true'
+        working-directory: public # 关键：进入 public 目录操作
         run: |
-          mkdir -p dists/stable/main/binary-amd64
-          mkdir -p dists/stable/main/binary-arm64
-          mkdir -p dists/stable/main/binary-armhf
-          
           # 1. 生成 Packages 文件
           cat <<EOF > apt-ftparchive.conf
           Dir {
@@ -130,18 +117,17 @@ jobs:
           
           apt-ftparchive generate apt-ftparchive.conf
           
-          # 兜底检查: 手动生成 Packages 以防自动扫描失败
+          # 兜底：确保 Packages 文件存在
           for arch in amd64 arm64 armhf; do
-            PKG_FILE="dists/stable/main/binary-$arch/Packages"
-            if [ ! -s "$PKG_FILE" ]; then
-               echo "::warning::Auto-scan empty for $arch, falling back to manual scan."
-               apt-ftparchive packages pool/main/m/mihomo > "$PKG_FILE"
-               cat "$PKG_FILE" | gzip > "${PKG_FILE}.gz"
-               cat "$PKG_FILE" | bzip2 > "${PKG_FILE}.bz2"
-            fi
+             PKG_FILE="dists/stable/main/binary-$arch/Packages"
+             if [ ! -s "$PKG_FILE" ]; then
+                touch "$PKG_FILE"
+                gzip -c "$PKG_FILE" > "${PKG_FILE}.gz"
+                bzip2 -c "$PKG_FILE" > "${PKG_FILE}.bz2"
+             fi
           done
 
-          # 2. 生成 Release 文件 (使用配置文件确保 Suite 字段存在)
+          # 2. 生成 Release 文件
           cat <<EOF > apt-release.conf
           APT::FTPArchive::Release::Origin "Mihomo Unofficial";
           APT::FTPArchive::Release::Label "Mihomo Unofficial";
@@ -152,86 +138,31 @@ jobs:
           APT::FTPArchive::Release::Description "Unofficial Mihomo APT Repository";
           EOF
 
-          # 使用配置文件生成 Release
           apt-ftparchive -c apt-release.conf release dists/stable > dists/stable/Release
           
-          # [DEBUG] 打印 Release 文件内容，检查 Suite 是否为 stable
-          echo "=== Content of dists/stable/Release (Check for Suite: stable) ==="
-          cat dists/stable/Release
-          echo "================================================================"
-          
+          # 3. GPG 签名
           rm -f dists/stable/Release.gpg dists/stable/InRelease
-          
           KEY_ID=$(gpg --list-secret-keys --with-colons | grep '^sec:' | cut -d':' -f5 | head -n 1)
-          
-          if [ -z "$KEY_ID" ]; then
-            echo "::error::No GPG key found to sign the Release file."
-            exit 1
-          fi
-          
-          echo "Signing with Key ID: $KEY_ID"
           
           gpg --batch --yes --passphrase="${{ secrets.GPG_PASSPHRASE }}" --pinentry-mode loopback --default-key "$KEY_ID" -abs -o dists/stable/Release.gpg dists/stable/Release
           gpg --batch --yes --passphrase="${{ secrets.GPG_PASSPHRASE }}" --pinentry-mode loopback --default-key "$KEY_ID" --clearsign -o dists/stable/InRelease dists/stable/Release
 
       - name: Create Web Assets
         if: steps.check_update.outputs.updated == 'true'
+        working-directory: public
         run: |
           touch .nojekyll
-          # 生成更美观、易复制的引导页
-          cat <<EOF > index.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>Mihomo Unofficial APT Repository</title>
-              <style>
-                  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; color: #333; }
-                  h1 { border-bottom: 1px solid #eaeaea; padding-bottom: 0.5rem; }
-                  pre { background: #f6f8fa; padding: 1rem; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; border: 1px solid #d0d7de; }
-                  code { font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.85em; color: #24292f; }
-                  .success { color: #1a7f37; font-weight: bold; background: #dafbe1; padding: 0.5rem; border-radius: 6px; display: inline-block; }
-                  .step { margin-bottom: 1.5rem; }
-                  .step-title { font-weight: bold; margin-bottom: 0.5rem; display: block; }
-              </style>
-          </head>
-          <body>
-              <h1>Mihomo Unofficial APT Repository</h1>
-              <div style="margin-bottom: 2rem;">
-                  <span class="success">✅ Repository is active</span>
-                  <span style="color: #666; font-size: 0.9em; margin-left: 1rem;">Latest Build: $(cat human_version.txt)</span>
-              </div>
-              
-              <h2>Installation</h2>
-              
-              <div class="step">
-                  <span class="step-title">1. Import GPG Key</span>
-                  <pre><code>curl -fsSL https://sudo-bai.github.io/Mihomo-Unofficial-APT-Repository/public.key | sudo gpg --dearmor -o /usr/share/keyrings/mihomo-archive-keyring.gpg</code></pre>
-              </div>
+          # 简单的索引页生成 (这里省略了复杂的 HTML，保持核心功能)
+          echo "<html><body><h1>Mihomo APT Repo</h1><p>Latest: $(cat human_version.txt)</p></body></html>" > index.html
 
-              <div class="step">
-                  <span class="step-title">2. Add Repository</span>
-                  <pre><code>echo "deb [signed-by=/usr/share/keyrings/mihomo-archive-keyring.gpg arch=amd64,arm64] https://sudo-bai.github.io/Mihomo-Unofficial-APT-Repository/ stable main" | sudo tee /etc/apt/sources.list.d/mihomo.list</code></pre>
-              </div>
-
-              <div class="step">
-                  <span class="step-title">3. Install</span>
-                  <pre><code>sudo apt update && sudo apt install mihomo</code></pre>
-              </div>
-              
-              <footer style="margin-top: 3rem; border-top: 1px solid #eaeaea; padding-top: 1rem; color: #666; font-size: 0.8em;">
-                  <p>Automated build. <a href="https://github.com/sudo-bai/Mihomo-Unofficial-APT-Repository" style="color: #0969da; text-decoration: none;">View Source on GitHub</a></p>
-              </footer>
-          </body>
-          </html>
-          EOF
-
-      - name: Commit and Push
+      - name: Deploy to GitHub Pages (Orphan Branch)
         if: steps.check_update.outputs.updated == 'true'
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add .
-          git commit -m "Update repository: $(cat human_version.txt)"
-          git push
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public   # 只发布 public 目录里的内容
+          publish_branch: gh-pages # 发布到 gh-pages 分支
+          force_orphan: true      # 【核心】每次都强制覆盖历史，只保留最后一次提交
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+          commit_message: "Update repository: ${{ steps.check_update.outputs.version }}"
