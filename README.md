@@ -1,8 +1,8 @@
 # Mihomo Smart分支 非官方 APT 软件源 (Unofficial Repository)
 
-[](https://www.google.com/search?q=https://github.com/sudo-bai/Mihomo-Unofficial-APT-Repository/actions/workflows/update_repo.yml)
+[](https://github.com/sudo-bai/Mihomo-Unofficial-APT-Repository/actions/workflows/update_repo.yml)
 
-这是一个自动化的 APT 软件源，用于在 Debian/Ubuntu 系统上方便地安装和更新 [Mihomo](https://www.google.com/search?q=https://github.com/vernesong/mihomo) 内核。
+这是一个自动化的 APT 软件源，用于在 Debian/Ubuntu 系统上方便地安装和更新 [Mihomo](https://github.com/vernesong/mihomo) 内核。
 
 本仓库通过 GitHub Actions 定时追踪上游的 **Prerelease (Alpha)** 版本，自动下载 `.deb` 包并更新 APT 索引。
 
